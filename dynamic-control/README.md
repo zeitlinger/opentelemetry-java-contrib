@@ -120,6 +120,12 @@ telemetry_policy/development:
 
 ```
 
+OpAMP client settings do not yet have an agreed declarative schema. Configure
+`otel.opamp.service.url` and `otel.experimental.opamp.headers` using system properties or
+environment variables even when policy sources are configured declaratively. The OpAMP service
+name uses `otel.service.name` when set, then the `service.name` resource attribute, and finally
+`unknown_service:java`.
+
 ### Using as an auto-configured extension
 
 You can use either `otel.java.experimental.telemetry.policy.init.yaml`

@@ -19,14 +19,17 @@ import io.opentelemetry.contrib.dynamic.policy.tracesampling.TraceSamplingRatePo
 import io.opentelemetry.instrumentation.config.bridge.DeclarativeConfigBridge;
 import io.opentelemetry.sdk.autoconfigure.spi.AutoConfigurationCustomizer;
 import io.opentelemetry.sdk.autoconfigure.spi.ConfigProperties;
+import io.opentelemetry.sdk.autoconfigure.spi.internal.DefaultConfigProperties;
 import java.io.Closeable;
 import java.io.IOException;
 import java.lang.reflect.Proxy;
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.HashMap;
 import java.util.HashSet;
 import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
@@ -56,8 +59,10 @@ import java.util.logging.Logger;
  */
 public final class PolicyInit {
   private static final Logger logger = Logger.getLogger(PolicyInit.class.getName());
+  private static final String OPAMP_ENDPOINT_CONFIG_PROPERTY = "otel.opamp.service.url";
   private static final String OPAMP_HEADERS_CONFIG_PROPERTY = "otel.experimental.opamp.headers";
   private static final String RESOURCE_ATTRIBUTES_CONFIG_PROPERTY = "otel.resource.attributes";
+  private static final String SERVICE_NAME_CONFIG_PROPERTY = "otel.service.name";
   private static final Map<String, Class<? extends TelemetryPolicy>> REGISTERED_POLICY_TYPES =
       new ConcurrentHashMap<>();
   private static final Map<Class<? extends TelemetryPolicy>, PolicyTypeInitializer>
@@ -168,6 +173,63 @@ public final class PolicyInit {
   }
 
   /**
+   * Resolves OpAMP client settings from system properties and environment variables.
+   *
+   * <p>Policy source structure remains declarative, but OpAMP does not yet have an agreed
+   * declarative schema. Until it does, the declarative component uses the same flat properties as
+   * legacy auto-configuration.
+   */
+  private static PolicyProviderConfig createEnvironmentProviderConfig(
+      DeclarativeConfigProperties declarativeConfig) {
+    Map<String, String> properties = new HashMap<>();
+    copySystemOrEnvironment(properties, OPAMP_ENDPOINT_CONFIG_PROPERTY);
+    copySystemOrEnvironment(properties, OPAMP_HEADERS_CONFIG_PROPERTY);
+    copySystemOrEnvironment(properties, RESOURCE_ATTRIBUTES_CONFIG_PROPERTY);
+    copySystemOrEnvironment(properties, SERVICE_NAME_CONFIG_PROPERTY);
+    ConfigProperties config = DefaultConfigProperties.createFromMap(properties);
+    Map<String, String> resourceAttributes =
+        readDeclarativeStringMap(declarativeConfig, RESOURCE_ATTRIBUTES_CONFIG_PROPERTY);
+    if (resourceAttributes.isEmpty()) {
+      resourceAttributes = readDeclarativeStringMap(declarativeConfig, "resource_attributes");
+    }
+    if (resourceAttributes.isEmpty()) {
+      resourceAttributes = config.getMap(RESOURCE_ATTRIBUTES_CONFIG_PROPERTY);
+    }
+    return PolicyProviderConfig.createWithLegacyProperties(
+        DeclarativeConfigBridge.createComponentProperties(config, ""),
+        resourceAttributes,
+        config.getMap(OPAMP_HEADERS_CONFIG_PROPERTY));
+  }
+
+  private static Map<String, String> readDeclarativeStringMap(
+      DeclarativeConfigProperties config, String propertyName) {
+    Map<String, String> result = new HashMap<>();
+    DeclarativeConfigProperties mapProperties = config.getStructured(propertyName);
+    if (mapProperties == null) {
+      return result;
+    }
+    for (String key : mapProperties.getPropertyKeys()) {
+      String value = mapProperties.getString(key);
+      if (value != null) {
+        result.put(key, value);
+      }
+    }
+    return result;
+  }
+
+  private static void copySystemOrEnvironment(
+      Map<String, String> destination, String propertyName) {
+    String value = System.getProperty(propertyName);
+    if (value == null) {
+      value =
+          System.getenv(propertyName.toUpperCase(Locale.ROOT).replace('.', '_').replace('-', '_'));
+    }
+    if (value != null) {
+      destination.put(propertyName, value);
+    }
+  }
+
+  /**
    * Stores parsed top-level declarative telemetry policy config for auto-configuration bootstrap.
    */
   public static void setDeclarativeInitConfig(PolicyInitConfig initConfig) {
@@ -187,7 +249,7 @@ public final class PolicyInit {
     }
     resolveAndInitializeConfiguredPolicyTypes(initConfig, createNoopAutoConfigurationCustomizer());
     try {
-      activateSources(initConfig, PolicyProviderConfig.create(declarativeConfig));
+      activateSources(initConfig, createEnvironmentProviderConfig(declarativeConfig));
     } catch (RuntimeException e) {
       logger.log(
           Level.WARNING,
